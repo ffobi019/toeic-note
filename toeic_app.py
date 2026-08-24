@@ -92,7 +92,7 @@ def analyze_image_with_gemini(image, api_key):
     
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         prompt = """
         이 이미지는 토익(TOEIC) 문제 또는 단어장 사진입니다. 이미지 내용을 분석하여 다음 JSON 형식으로만 정확히 답변해주세요. 다른 설명이나 마크다운 백틱(```json 등)은 붙이지 말고 순수 JSON 문자열만 출력하세요.
