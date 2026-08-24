@@ -4,6 +4,7 @@ import streamlit as st
 from PIL import Image
 import base64
 from io import BytesIO
+import google.generativeai as genai
 
 # Page configuration for mobile view optimized layout
 st.set_page_config(
@@ -71,13 +72,55 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-def image_to_base64(image_path):
-    if image_path and os.path.exists(image_path):
-        with open(image_path, "rb") as img_file:
-            return base64.b64encode(img_file.read()).decode()
-    return None
+def get_gemini_api_key():
+    api_key = None
+    if "GEMINI_API_KEY" in st.secrets:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    
+    with st.sidebar:
+        st.subheader("⚙️ 설정")
+        user_key = st.text_input("Gemini API 키", value=api_key or "", type="password", help="Google AI Studio에서 발급받은 API 키를 입력하세요.")
+        if user_key:
+            api_key = user_key
+            
+    return api_key
+
+def analyze_image_with_gemini(image, api_key):
+    if not api_key:
+        st.warning("Gemini API 키가 설정되지 않아 AI 자동 분석을 건너뜁니다. 사이드바에서 API 키를 입력해 주세요.")
+        return None, None
+    
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt = """
+        이 이미지는 토익(TOEIC) 문제 또는 단어장 사진입니다. 이미지 내용을 분석하여 다음 JSON 형식으로만 정확히 답변해주세요. 다른 설명이나 마크다운 백틱(```json 등)은 붙이지 말고 순수 JSON 문자열만 출력하세요.
+        {
+            "title": "문제 번호 또는 핵심 단어 요약 (예: Part 5 101번 또는 Acquired)",
+            "content": "문제 내용, 보기, 정답 및 상세한 해설을 정리해서 작성"
+        }
+        """
+        
+        response = model.generate_content([prompt, image])
+        result_text = response.text.strip()
+        
+        if result_text.startswith("```json"):
+            result_text = result_text[7:]
+        if result_text.startswith("```"):
+            result_text = result_text[3:]
+        if result_text.endswith("```"):
+            result_text = result_text[:-3]
+            
+        parsed = json.loads(result_text.strip())
+        return parsed.get("title", ""), parsed.get("content", "")
+    except Exception as e:
+        st.error(f"AI 분석 중 오류가 발생했습니다: {e}")
+        return None, None
 
 def main():
+    api_key = get_gemini_api_key()
+    
     st.markdown("<h2 style='text-align: center; color: #007bff;'>🎯 토익 오답 & 단어 노트</h2>", unsafe_allow_html=True)
     st.write("")
 
@@ -88,12 +131,29 @@ def main():
     with tab1:
         st.markdown("### 새로운 오답/단어 추가")
         
-        with st.form("note_form", clear_on_submit=True):
-            note_type = st.radio("유형 선택", ["단어", "오답 문제"], horizontal=True)
-            title = st.text_input("제목 (예: Part 5 10번 문제 / Acquired 뜻)", placeholder="핵심 제목을 입력하세요")
-            content = st.text_area("내용 및 해설", placeholder="문제 내용, 단어 뜻, 오답 이유 및 해설을 입력하세요")
+        if "ai_title" not in st.session_state:
+            st.session_state.ai_title = ""
+        if "ai_content" not in st.session_state:
+            st.session_state.ai_content = ""
             
-            uploaded_file = st.file_uploader("사진 업로드 (카메라 촬영 또는 갤러리 선택)", type=["jpg", "jpeg", "png"])
+        uploaded_file = st.file_uploader("사진 업로드 (카메라 촬영 또는 갤러리 선택)", type=["jpg", "jpeg", "png"])
+        
+        if uploaded_file is not None:
+            img = Image.open(uploaded_file)
+            st.image(img, caption="업로드된 사진 미리보기", use_container_width=True)
+            
+            if st.button("🤖 Gemini AI로 사진 자동 분석하기"):
+                with st.spinner("AI가 사진 속 문제와 해설을 분석 중입니다..."):
+                    t, c = analyze_image_with_gemini(img, api_key)
+                    if t is not None:
+                        st.session_state.ai_title = t
+                        st.session_state.ai_content = c
+                        st.success("AI 분석 완료! 아래 입력란에 내용이 자동으로 채워졌습니다.")
+
+        with st.form("note_form", clear_on_submit=False):
+            note_type = st.radio("유형 선택", ["단어", "오답 문제"], horizontal=True)
+            title = st.text_input("제목", value=st.session_state.ai_title, placeholder="핵심 제목을 입력하세요")
+            content = st.text_area("내용 및 해설", value=st.session_state.ai_content, placeholder="문제 내용, 단어 뜻, 오답 이유 및 해설을 입력하세요")
             
             submitted = st.form_submit_button("저장하기")
             
@@ -103,7 +163,6 @@ def main():
                 else:
                     image_path = None
                     if uploaded_file is not None:
-                        img = Image.open(uploaded_file)
                         image_filename = f"{os.urandom(8).hex()}_{uploaded_file.name}"
                         image_path = os.path.join(IMAGE_DIR, image_filename)
                         img.save(image_path)
@@ -118,13 +177,16 @@ def main():
                     
                     notes.append(new_item)
                     save_data(notes)
+                    st.session_state.ai_title = ""
+                    st.session_state.ai_content = ""
                     st.success("성공적으로 저장되었습니다!")
+                    st.rerun()
 
     with tab2:
         st.markdown("### 플래시카드 복습 및 리스트")
         
         if not notes:
-            info_box = st.info("저장된 노트가 없습니다. '문제/단어 등록' 탭에서 첫 번째 노트를 추가해 보세요!")
+            st.info("저장된 노트가 없습니다. '문제/단어 등록' 탭에서 첫 번째 노트를 추가해 보세요!")
         else:
             filter_type = st.selectbox("필터", ["전체", "단어", "오답 문제"])
             
